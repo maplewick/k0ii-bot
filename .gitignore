@@ -1,0 +1,4 @@
+.env
+node_modules
+clan.db.json
+points_snapshot.json
