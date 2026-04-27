@@ -33,8 +33,9 @@ async function getOwnedGamepasses(robloxId) {
   }));
   return owned;
 }
-const DB_PATH = "./clan.db.json";
-const SNAPSHOT_PATH = "./points_snapshot.json";
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || ".";
+const DB_PATH = `${DATA_DIR}/clan.db.json`;
+const SNAPSHOT_PATH = `${DATA_DIR}/points_snapshot.json`;
 const SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
 
 let pointsSnapshot = {};
