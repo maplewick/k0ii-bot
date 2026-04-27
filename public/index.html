@@ -534,6 +534,14 @@
           <div class="field-value">${member.battlePoints.toLocaleString()}${member.hourlyGain !== null ? ` <span style="font-size:13px;color:${member.hourlyGain >= 0 ? 'var(--green)' : 'var(--red)'};">(${member.hourlyGain >= 0 ? '+' : ''}${fmt(member.hourlyGain)}/hr)</span>` : ''}</div>
         </div>`);
 
+      if (member.placement) {
+        fields.push(`
+          <div class="modal-field">
+            <div class="field-label">Clan Placement</div>
+            <div class="field-value">${member.placement}</div>
+          </div>`);
+      }
+
       if (member.timezone) {
         fields.push(`
           <div class="modal-field">

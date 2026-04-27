@@ -138,12 +138,14 @@ async function getClanMemberStats(robloxId) {
 
   const battles = data.data?.Battles ?? {};
   const activeBattle = Object.values(battles).find((b) => b.ProcessedAwards === false);
-  const battlePoints = activeBattle
-    ? (activeBattle.PointContributions ?? []).find((m) => String(m.UserID) === String(robloxId))?.Points ?? 0
-    : 0;
+  const contributions = activeBattle?.PointContributions ?? [];
+  const sorted = [...contributions].sort((a, b) => b.Points - a.Points);
+  const userIndex = sorted.findIndex((m) => String(m.UserID) === String(robloxId));
+  const battlePoints = userIndex >= 0 ? sorted[userIndex].Points : 0;
+  const placement = userIndex >= 0 ? `#${userIndex + 1} / ${sorted.length}` : null;
   const activeBattleName = activeBattle ? activeBattle.BattleID : null;
 
-  return { Points: battlePoints, Role: role, BattleName: activeBattleName };
+  return { Points: battlePoints, Role: role, BattleName: activeBattleName, Placement: placement };
 }
 
 async function getOrCreateRole(guild, name, color) {
@@ -294,7 +296,8 @@ client.on("interactionCreate", async (interaction) => {
       const battleLabel = clanStats.BattleName ? `Battle Points (${clanStats.BattleName})` : "Battle Points";
       embed.addFields(
         { name: battleLabel, value: clanStats.Points.toLocaleString(), inline: true },
-        { name: "Clan Role", value: clanStats.Role, inline: true }
+        { name: "Clan Role", value: clanStats.Role, inline: true },
+        { name: "Clan Placement", value: clanStats.Placement ?? "Not contributing", inline: true }
       );
 
       const snapshotPoints = pointsSnapshot?.points?.[String(row.roblox_id)];
@@ -442,7 +445,9 @@ app.get("/api/members", async (req, res) => {
       Object.entries(members)
         .filter(([, m]) => m.roblox_id)
         .map(async ([discordId, m]) => {
-          const battleEntry = contributions.find((c) => String(c.UserID) === String(m.roblox_id));
+          const sortedContribs = [...contributions].sort((a, b) => b.Points - a.Points);
+          const battleIndex = sortedContribs.findIndex((c) => String(c.UserID) === String(m.roblox_id));
+          const battleEntry = battleIndex >= 0 ? sortedContribs[battleIndex] : null;
           const clanEntry = clanMembers.find((c) => String(c.UserID) === String(m.roblox_id));
           const role = clanEntry
             ? clanEntry.PermissionLevel >= 90 ? "Owner"
@@ -451,6 +456,7 @@ app.get("/api/members", async (req, res) => {
           const snapshotPts = pointsSnapshot?.points?.[String(m.roblox_id)];
           const currentPts = battleEntry?.Points ?? 0;
           const gain = snapshotPts !== undefined ? currentPts - snapshotPts : null;
+          const placement = battleIndex >= 0 ? `#${battleIndex + 1} / ${sortedContribs.length}` : null;
           const avatar = await getRobloxAvatar(m.roblox_id).catch(() => null);
           return {
             discordId,
@@ -463,6 +469,7 @@ app.get("/api/members", async (req, res) => {
             battlePoints: currentPts,
             battleName: activeBattle?.BattleID ?? null,
             hourlyGain: gain,
+            placement,
             avatar,
           };
         })
