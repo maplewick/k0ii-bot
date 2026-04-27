@@ -419,3 +419,59 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(TOKEN);
+
+// ── Express API ──────────────────────────────────────────────────────────────
+const express = require("express");
+const path = require("path");
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/api/members", async (req, res) => {
+  try {
+    const clanRes = await fetch(`https://ps99.biggamesapi.io/api/clan/${CLAN_NAME}`);
+    const clanData = await clanRes.json();
+    const battles = clanData.data?.Battles ?? {};
+    const activeBattle = Object.values(battles).find((b) => b.ProcessedAwards === false);
+    const contributions = activeBattle?.PointContributions ?? [];
+    const clanMembers = clanData.data?.Members ?? [];
+
+    const result = await Promise.all(
+      Object.entries(members)
+        .filter(([, m]) => m.roblox_id)
+        .map(async ([discordId, m]) => {
+          const battleEntry = contributions.find((c) => String(c.UserID) === String(m.roblox_id));
+          const clanEntry = clanMembers.find((c) => String(c.UserID) === String(m.roblox_id));
+          const role = clanEntry
+            ? clanEntry.PermissionLevel >= 90 ? "Owner"
+            : clanEntry.PermissionLevel >= 50 ? "Officer" : "Member"
+            : "Member";
+          const snapshotPts = pointsSnapshot?.points?.[String(m.roblox_id)];
+          const currentPts = battleEntry?.Points ?? 0;
+          const gain = snapshotPts !== undefined ? currentPts - snapshotPts : null;
+          const avatar = await getRobloxAvatar(m.roblox_id).catch(() => null);
+          return {
+            discordId,
+            roblox_id: m.roblox_id,
+            roblox_username: m.roblox_username,
+            alts: m.alts ?? [],
+            timezone: m.timezone ?? null,
+            region: m.region ?? null,
+            role,
+            battlePoints: currentPts,
+            battleName: activeBattle?.BattleID ?? null,
+            hourlyGain: gain,
+            avatar,
+          };
+        })
+    );
+
+    result.sort((a, b) => b.battlePoints - a.battlePoints);
+    res.json({ status: "ok", clan: CLAN_NAME, battle: activeBattle?.BattleID ?? null, members: result });
+  } catch (e) {
+    res.status(500).json({ status: "error", error: e.message });
+  }
+});
+
+app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
