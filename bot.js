@@ -6,7 +6,15 @@ const fs = require("fs");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+const BLOXLINK_API_KEY = process.env.BLOXLINK_API_KEY;
 const CLAN_NAME = "K0ii";
+const OFFICER_ROLES = ["Officer", "Owner"];
+
+const { createBloxlinkClient } = require("./lib/bloxlink");
+const { calculateInactiveMs, formatInactiveLabel } = require("./lib/inactivity");
+const { buildInactivePingMessage } = require("./lib/ping-format");
+
+const Bloxlink = createBloxlinkClient({ apiKey: BLOXLINK_API_KEY, guildId: GUILD_ID, fetchImpl: fetch });
 
 const PS99_GAMEPASSES = [
   { id: 205379487,  name: "Lucky! 🍀"            },
@@ -37,14 +45,23 @@ const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || ".";
 const DB_PATH = `${DATA_DIR}/clan.db.json`;
 const SNAPSHOT_PATH = `${DATA_DIR}/points_snapshot.json`;
 const SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
+const MAX_SNAPSHOT_HISTORY = 24;
 
 let pointsSnapshot = {};
+let snapshotHistory = [];
 if (fs.existsSync(SNAPSHOT_PATH)) {
-  pointsSnapshot = JSON.parse(fs.readFileSync(SNAPSHOT_PATH, "utf8"));
+  const saved = JSON.parse(fs.readFileSync(SNAPSHOT_PATH, "utf8"));
+  if (Array.isArray(saved)) {
+    snapshotHistory = saved;
+    pointsSnapshot = saved[saved.length - 1] ?? {};
+  } else {
+    pointsSnapshot = saved;
+    snapshotHistory = [saved];
+  }
 }
 
 function saveSnapshot() {
-  fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(pointsSnapshot, null, 2));
+  fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(snapshotHistory, null, 2));
 }
 
 async function fetchAllClanPoints() {
@@ -65,9 +82,11 @@ async function fetchAllClanPoints() {
 async function runHourlySnapshot() {
   const snapshot = await fetchAllClanPoints();
   if (!snapshot) return;
-  if (pointsSnapshot.battleID && pointsSnapshot.battleID !== snapshot.battleID) {
-    pointsSnapshot = {};
+  if (snapshotHistory.length > 0 && snapshotHistory[0].battleID !== snapshot.battleID) {
+    snapshotHistory = [];
   }
+  snapshotHistory.push(snapshot);
+  if (snapshotHistory.length > MAX_SNAPSHOT_HISTORY) snapshotHistory.shift();
   pointsSnapshot = snapshot;
   saveSnapshot();
   console.log(`[${new Date().toISOString()}] Snapshot saved for battle: ${snapshot.battleID}`);
@@ -179,6 +198,15 @@ const commands = [
     .addStringOption((o) => o.setName("username").setDescription("Alt account Roblox username to remove").setRequired(true)),
 
   new SlashCommandBuilder()
+    .setName("importmembers")
+    .setDescription("Auto-link all clan members via Bloxlink (Officers only)"),
+
+  new SlashCommandBuilder()
+    .setName("inactive")
+    .setDescription("Show inactive members based on point history (Officers only)")
+    .addIntegerOption((o) => o.setName("hours").setDescription("Hours of inactivity threshold (default: 3)").setRequired(false)),
+
+  new SlashCommandBuilder()
     .setName("setzone")
     .setDescription("Set your timezone and get region roles")
     .addStringOption((o) =>
@@ -205,6 +233,10 @@ client.on("clientReady", () => {
 });
 
 const REQUIRED_ROLE = "K0ii Clan Member";
+
+function isOfficer(member) {
+  return member.roles.cache.some((r) => ["Officer", "Owner"].includes(r.name));
+}
 const ALLOWED_CHANNELS = ["🛠┃dev-tests", "🤖┃k0ii-bot"];
 
 function hasClanRole(member) {
@@ -381,6 +413,76 @@ client.on("interactionCreate", async (interaction) => {
     members[userId] = { ...members[userId], alts: newAlts };
     saveDb();
     return interaction.editReply({ content: `Alt account **${username}** has been removed from your profile.` });
+  }
+
+  if (commandName === "importmembers") {
+    if (!isOfficer(interaction.member)) {
+      return interaction.reply({ content: "You need the Officer role to use this command.", flags: 64 });
+    }
+    await interaction.deferReply({ ephemeral: true });
+
+    if (!BLOXLINK_API_KEY) {
+      return interaction.editReply({ content: "Bloxlink API key is not configured." });
+    }
+
+    const guild = interaction.guild;
+    await guild.members.fetch();
+    const clanRole = guild.roles.cache.find((r) => r.name === REQUIRED_ROLE);
+    if (!clanRole) return interaction.editReply({ content: `Could not find the "${REQUIRED_ROLE}" role.` });
+
+    const eligibleMembers = guild.members.cache.filter((m) => m.roles.cache.has(clanRole.id) && !m.user.bot);
+    let imported = 0, skipped = 0, failed = 0;
+
+    for (const [discordId, member] of eligibleMembers) {
+      if (members[discordId]?.roblox_id) { skipped++; continue; }
+      try {
+        const robloxId = await Bloxlink.lookupRobloxId(discordId);
+        if (!robloxId) { failed++; continue; }
+        const robloxUser = await fetch(`https://users.roblox.com/v1/users/${robloxId}`).then(r => r.json());
+        if (!robloxUser?.name) { failed++; continue; }
+        members[discordId] = { ...members[discordId], roblox_id: robloxId, roblox_username: robloxUser.name };
+        imported++;
+      } catch { failed++; }
+    }
+
+    saveDb();
+    return interaction.editReply({
+      content: `Import complete.
+✅ Imported: **${imported}**
+⏭️ Already linked: **${skipped}**
+❌ Failed: **${failed}**`
+    });
+  }
+
+  if (commandName === "inactive") {
+    if (!isOfficer(interaction.member)) {
+      return interaction.reply({ content: "You need the Officer role to use this command.", flags: 64 });
+    }
+    await interaction.deferReply({ ephemeral: true });
+
+    const hours = interaction.options.getInteger("hours") ?? 3;
+    const thresholdMs = hours * 60 * 60 * 1000;
+
+    if (snapshotHistory.length < 2) {
+      return interaction.editReply({ content: "Not enough snapshot history yet. Try again after a few hours." });
+    }
+
+    const inactivePlayers = [];
+    for (const [discordId, m] of Object.entries(members)) {
+      if (!m.roblox_id) continue;
+      const inactiveMs = calculateInactiveMs(snapshotHistory, String(m.roblox_id), SNAPSHOT_INTERVAL_MS);
+      if (inactiveMs >= thresholdMs) {
+        const discordIds = await Bloxlink.lookupDiscordIds(m.roblox_id).catch(() => [discordId]);
+        inactivePlayers.push({
+          roblox_username: m.roblox_username,
+          discordIds: discordIds.length > 0 ? discordIds : [discordId],
+          inactiveLabel: formatInactiveLabel(inactiveMs),
+        });
+      }
+    }
+
+    const message = buildInactivePingMessage(inactivePlayers, `Members inactive for ${hours}h+`);
+    return interaction.editReply({ content: message.slice(0, 2000) });
   }
 
   if (commandName === "setzone") {
