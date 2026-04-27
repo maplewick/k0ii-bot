@@ -103,6 +103,20 @@ function saveBotState() {
   saveJson(BOT_STATE_PATH, botState);
 }
 
+function getCurrentBattleHistory(history) {
+  if (!Array.isArray(history) || history.length === 0) return [];
+  const latest = history[history.length - 1];
+  const latestBattleId = latest?.battleID;
+  if (!latestBattleId) return history.slice();
+
+  let startIndex = history.length - 1;
+  while (startIndex > 0 && history[startIndex - 1]?.battleID === latestBattleId) {
+    startIndex -= 1;
+  }
+
+  return history.slice(startIndex);
+}
+
 async function fetchAllClanPoints() {
   const res = await fetch(`https://ps99.biggamesapi.io/api/clan/${CLAN_NAME}`);
   const data = await res.json();
@@ -135,7 +149,6 @@ async function fetchAllClanPoints() {
       roblox_username: `User ${id}`,
       displayName: `User ${id}`,
     };
-    const linkedProfile = Object.values(members).find((value) => String(value.roblox_id) === id) ?? {};
 
     return {
       roblox_id: id,
@@ -144,9 +157,9 @@ async function fetchAllClanPoints() {
       avatarUrl: avatarMap[id] ?? null,
       permissionLevel: Number(member.PermissionLevel) || 0,
       role: String(data.data?.Owner) === id ? "Owner" : Number(member.PermissionLevel) >= 90 ? "Officer" : "Member",
-      timezone: linkedProfile.timezone ?? null,
-      region: linkedProfile.region ?? null,
-      discordId: linkedProfile?.discordId ?? null,
+      timezone: null,
+      region: null,
+      discordId: null,
       battlePoints: Number(points[id] ?? 0),
     };
   }));
@@ -164,9 +177,6 @@ async function fetchAllClanPoints() {
 
 function upsertHistory(snapshot) {
   if (!snapshot) return;
-  if (pointsSnapshot?.battleID && pointsSnapshot.battleID !== snapshot.battleID) {
-    clanHistory = [];
-  }
   pointsSnapshot = snapshot;
   saveSnapshot();
   clanHistory.push(snapshot);
@@ -228,14 +238,6 @@ async function runSnapshot() {
 
 function getLatestHistory() {
   return clanHistory[clanHistory.length - 1] ?? pointsSnapshot ?? null;
-}
-
-function getTrackedMemberIds() {
-  return [...new Set(
-    Object.values(members)
-      .map((m) => String(m.roblox_id ?? ""))
-      .filter(Boolean)
-  )];
 }
 
 function pointsAtTimestamp(history, keyFn, timestamp) {
@@ -490,7 +492,8 @@ function findClanPointsAt(history, clanName, targetTimestamp) {
 }
 
 async function buildSitePayload() {
-  const history = clanHistory.length > 0 ? clanHistory : (pointsSnapshot?.timestamp ? [pointsSnapshot] : []);
+  const rawHistory = clanHistory.length > 0 ? clanHistory : (pointsSnapshot?.timestamp ? [pointsSnapshot] : []);
+  const history = getCurrentBattleHistory(rawHistory);
   const latest = history[history.length - 1] ?? null;
   const prev5m = history.length > 1 ? history[history.length - 2] : null;
   const hourAgoTimestamp = latest ? latest.timestamp - 60 * 60 * 1000 : null;
@@ -509,19 +512,6 @@ async function buildSitePayload() {
       latest.timestamp - currentClanBase.timestamp
       )
     : null;
-
-  const linkedProfiles = Object.values(members).reduce((acc, value) => {
-    if (value?.roblox_id) {
-      acc[String(value.roblox_id)] = value;
-    }
-    return acc;
-  }, {});
-  const linkedDiscordIds = Object.entries(members).reduce((acc, [discordId, value]) => {
-    if (value?.roblox_id) {
-      acc[String(value.roblox_id)] = discordId;
-    }
-    return acc;
-  }, {});
 
   const enrichClan = (clan) => {
     if (!clan || !latest) return null;
@@ -589,15 +579,14 @@ async function buildSitePayload() {
     const ppd = pph === null ? null : pph * 24;
     const delta5m = current - previous;
     const series = buildMemberSeries(history, robloxId);
-    const linkedProfile = linkedProfiles[robloxId] ?? null;
     return {
-      discordId: linkedDiscordIds[robloxId] ?? null,
+      discordId: null,
       roblox_id: robloxId,
-      roblox_username: member.roblox_username ?? linkedProfile?.roblox_username ?? `User ${robloxId}`,
-      displayName: member.displayName ?? linkedProfile?.roblox_username ?? `User ${robloxId}`,
+      roblox_username: member.roblox_username ?? `User ${robloxId}`,
+      displayName: member.displayName ?? `User ${robloxId}`,
       avatarUrl: member.avatarUrl ?? null,
-      timezone: linkedProfile?.timezone ?? member.timezone ?? null,
-      region: linkedProfile?.region ?? member.region ?? null,
+      timezone: member.timezone ?? null,
+      region: member.region ?? null,
       role: member.role ?? "Member",
       currentPoints: current,
       battlePoints: current,
@@ -613,7 +602,7 @@ async function buildSitePayload() {
       inactiveLabel: inactive.inactiveLabel,
       gaining: delta5m > 0,
       series,
-      alts: linkedProfile?.alts ?? [],
+      alts: [],
     };
   });
 
@@ -699,17 +688,6 @@ const REGION_LABELS = {
   NA: "🌎 NA", SA: "🌎 SA", EU: "🌍 EU",
   ME: "🌍 ME", AS: "🌏 AS", OCE: "🌏 OCE",
 };
-
-async function getRobloxUser(username) {
-  const res = await fetch("https://users.roblox.com/v1/usernames/users", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ usernames: [username], excludeBannedUsers: false }),
-  });
-  const data = await res.json();
-  if (!data.data || data.data.length === 0) return null;
-  return data.data[0];
-}
 
 async function getRobloxAvatar(userId) {
   const res = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`);
@@ -844,24 +822,9 @@ const commands = [
     .setDescription("List the available bot commands and how to use them"),
 
   new SlashCommandBuilder()
-    .setName("link")
-    .setDescription("Link your Roblox account to your Discord profile")
-    .addStringOption((o) => o.setName("username").setDescription("Your Roblox username").setRequired(true)),
-
-  new SlashCommandBuilder()
     .setName("check")
-    .setDescription("View a clan member's linked Roblox profile")
+    .setDescription("View a Discord user's Bloxlink-linked Roblox profile")
     .addUserOption((o) => o.setName("user").setDescription("Discord user to check").setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName("linkalt")
-    .setDescription("Link a Roblox alt account to your profile")
-    .addStringOption((o) => o.setName("username").setDescription("Alt account Roblox username").setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName("unlinkalt")
-    .setDescription("Remove a Roblox alt account from your profile")
-    .addStringOption((o) => o.setName("username").setDescription("Alt account Roblox username to remove").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("pinginactive")
@@ -893,10 +856,7 @@ const commands = [
 
 const COMMAND_HELP = [
   { usage: "/help", description: "Show this command list." },
-  { usage: "/link <username>", description: "Link your main Roblox account to Discord." },
-  { usage: "/check <user>", description: "Show a linked member's Roblox and clan details." },
-  { usage: "/linkalt <username>", description: "Add a Roblox alt to your profile." },
-  { usage: "/unlinkalt <username>", description: "Remove a linked alt from your profile." },
+  { usage: "/check <user>", description: "Show a Discord user's Roblox and clan details through Bloxlink." },
   { usage: "/pinginactive", description: "Ping clan members who have not gained points since the last snapshot." },
   { usage: "/autopinginactive yes|no", description: "Toggle hourly inactive pings for this channel." },
   { usage: "/setzone <timezone>", description: "Set your timezone and assign the matching roles." },
@@ -995,59 +955,35 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  if (commandName === "link") {
-    await interaction.deferReply({ ephemeral: true });
-    const username = interaction.options.getString("username");
-    const robloxUser = await getRobloxUser(username);
-
-    if (!robloxUser) {
-      return interaction.editReply({ content: `Could not find a Roblox account with the username **${username}**. Double-check the spelling and try again.` });
-    }
-
-    const existingOwner = Object.entries(members).find(
-      ([id, m]) => String(m.roblox_id) === String(robloxUser.id) && id !== interaction.user.id
-    );
-
-    if (existingOwner) {
-      return interaction.editReply({ content: `**${robloxUser.name}** is already linked to another Discord account.` });
-    }
-
-    members[interaction.user.id] = {
-      ...members[interaction.user.id],
-      roblox_id: String(robloxUser.id),
-      roblox_username: robloxUser.name,
-    };
-    saveDb();
-
-    return interaction.editReply({ content: `Your Discord account is now linked to the Roblox account **${robloxUser.name}**.` });
-  }
-
   if (commandName === "check") {
     await interaction.deferReply();
     const target = interaction.options.getUser("user");
-    const row = members[target.id];
+    const robloxId = await Bloxlink.lookupRobloxId(target.id).catch((error) => {
+      console.warn(`Bloxlink lookup failed for ${target.id}: ${error.message}`);
+      return null;
+    });
 
-    if (!row) {
-      return interaction.editReply({ content: `**${target.username}** hasn't linked their Roblox account yet. They can do so with \`/link\`.` });
+    if (!robloxId) {
+      return interaction.editReply({ content: `**${target.username}** does not appear to have a Roblox account linked in Bloxlink.` });
     }
 
     const [profile, avatar, clanStats, ownedPasses] = await Promise.all([
-      getRobloxProfile(row.roblox_id),
-      getRobloxAvatar(row.roblox_id),
-      getClanMemberStats(row.roblox_id),
-      getOwnedGamepasses(row.roblox_id),
+      getRobloxProfile(robloxId),
+      getRobloxAvatar(robloxId),
+      getClanMemberStats(robloxId),
+      getOwnedGamepasses(robloxId),
     ]);
 
-    const displayName = profile.displayName !== row.roblox_username
-      ? `${profile.displayName} (@${row.roblox_username})`
-      : row.roblox_username;
+    const displayName = profile.displayName !== profile.name
+      ? `${profile.displayName} (@${profile.name})`
+      : profile.name;
 
     const embed = new EmbedBuilder()
       .setTitle(displayName)
-      .setURL(`https://www.roblox.com/users/${row.roblox_id}/profile`)
+      .setURL(`https://www.roblox.com/users/${robloxId}/profile`)
       .setThumbnail(avatar)
       .addFields(
-        { name: "Roblox Username", value: row.roblox_username, inline: true },
+        { name: "Roblox Username", value: profile.name ?? `User ${robloxId}`, inline: true },
         { name: "Discord", value: `<@${target.id}>`, inline: true }
       )
       .setColor(0x5865f2)
@@ -1061,7 +997,7 @@ client.on("interactionCreate", async (interaction) => {
         { name: "Clan Placement", value: clanStats.Placement ?? "Not contributing", inline: true }
       );
 
-      const snapshotPoints = pointsSnapshot?.points?.[String(row.roblox_id)];
+      const snapshotPoints = pointsSnapshot?.points?.[String(robloxId)];
       const snapshotBattle = pointsSnapshot?.battleID;
       if (snapshotPoints !== undefined && snapshotBattle === clanStats.BattleName) {
         const gain = clanStats.Points - snapshotPoints;
@@ -1076,18 +1012,14 @@ client.on("interactionCreate", async (interaction) => {
       embed.addFields({ name: "Clan Stats", value: "Not found in K0ii roster", inline: false });
     }
 
-    if (row.timezone) {
+    const row = members[target.id];
+    if (row?.timezone) {
       const tz = TIMEZONES.find((t) => t.value === row.timezone);
       if (tz) embed.addFields({ name: "Timezone", value: `${tz.utc} (${tz.value})`, inline: true });
     }
 
     if (profile.description && profile.description.length > 0) {
       embed.setDescription(profile.description.slice(0, 200));
-    }
-
-    const alts = row.alts ?? [];
-    if (alts.length > 0) {
-      embed.addFields({ name: "Alt Accounts", value: alts.map((a) => a.roblox_username).join(", "), inline: false });
     }
 
     if (ownedPasses.length > 0) {
@@ -1098,49 +1030,6 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     return interaction.editReply({ embeds: [embed] });
-  }
-
-  if (commandName === "linkalt") {
-    await interaction.deferReply({ ephemeral: true });
-    const username = interaction.options.getString("username");
-    const robloxUser = await getRobloxUser(username);
-
-    if (!robloxUser) {
-      return interaction.editReply({ content: `Could not find a Roblox account with the username **${username}**.` });
-    }
-
-    const userId = interaction.user.id;
-    const alts = members[userId]?.alts ?? [];
-
-    if (alts.some((a) => String(a.roblox_id) === String(robloxUser.id))) {
-      return interaction.editReply({ content: `**${robloxUser.name}** is already linked as an alt.` });
-    }
-
-    if (members[userId]?.roblox_id === String(robloxUser.id)) {
-      return interaction.editReply({ content: `**${robloxUser.name}** is already your main linked account.` });
-    }
-
-    alts.push({ roblox_id: String(robloxUser.id), roblox_username: robloxUser.name });
-    members[userId] = { ...members[userId], alts };
-    saveDb();
-
-    return interaction.editReply({ content: `Alt account **${robloxUser.name}** has been linked to your profile.` });
-  }
-
-  if (commandName === "unlinkalt") {
-    await interaction.deferReply({ ephemeral: true });
-    const username = interaction.options.getString("username").toLowerCase();
-    const userId = interaction.user.id;
-    const alts = members[userId]?.alts ?? [];
-    const newAlts = alts.filter((a) => a.roblox_username.toLowerCase() !== username);
-
-    if (newAlts.length === alts.length) {
-      return interaction.editReply({ content: `No alt account with username **${username}** found on your profile.` });
-    }
-
-    members[userId] = { ...members[userId], alts: newAlts };
-    saveDb();
-    return interaction.editReply({ content: `Alt account **${username}** has been removed from your profile.` });
   }
 
   if (commandName === "setzone") {
