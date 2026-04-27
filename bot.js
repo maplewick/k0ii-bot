@@ -134,7 +134,8 @@ async function getClanMemberStats(robloxId) {
   if (data.status !== "ok") return null;
   const memberEntry = (data.data?.Members ?? []).find((m) => String(m.UserID) === String(robloxId));
   if (!memberEntry) return null;
-  const role = memberEntry.PermissionLevel >= 90 ? "Owner" : memberEntry.PermissionLevel >= 50 ? "Officer" : "Member";
+  const isOwner = String(data.data?.Owner) === String(robloxId);
+  const role = isOwner ? "Owner" : memberEntry.PermissionLevel >= 90 ? "Officer" : "Member";
 
   const battles = data.data?.Battles ?? {};
   const activeBattle = Object.values(battles).find((b) => b.ProcessedAwards === false);
@@ -449,9 +450,10 @@ app.get("/api/members", async (req, res) => {
           const battleIndex = sortedContribs.findIndex((c) => String(c.UserID) === String(m.roblox_id));
           const battleEntry = battleIndex >= 0 ? sortedContribs[battleIndex] : null;
           const clanEntry = clanMembers.find((c) => String(c.UserID) === String(m.roblox_id));
+          const isOwner = String(clanData.data?.Owner) === String(m.roblox_id);
           const role = clanEntry
-            ? clanEntry.PermissionLevel >= 90 ? "Owner"
-            : clanEntry.PermissionLevel >= 50 ? "Officer" : "Member"
+            ? isOwner ? "Owner"
+            : clanEntry.PermissionLevel >= 90 ? "Officer" : "Member"
             : "Member";
           const snapshotPts = pointsSnapshot?.points?.[String(m.roblox_id)];
           const currentPts = battleEntry?.Points ?? 0;
