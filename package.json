@@ -4,7 +4,9 @@
   "main": "bot.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "test": "node --test",
+    "website": "node scripts/serve-website.js"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
